@@ -1,0 +1,31 @@
+[project]
+name = "paper-extrinsics"
+version = "0.1.0"
+description = "Camera pose per video frame from an A4 reference paper on the table"
+readme = "README.md"
+authors = [
+    { name = "Simone Cirelli", email = "simone.cirelli01@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "matplotlib>=3.11.2",
+    "numpy>=2.5.3",
+    "opencv-python-headless>=5.0.0.93",
+    "scipy>=1.18.1",
+]
+
+[project.scripts]
+extract-extrinsics = "paper_extrinsics.cli:main"
+view-scene = "paper_extrinsics.scene_viewer:main"
+
+[build-system]
+requires = ["uv_build>=0.11.8,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["tests"]

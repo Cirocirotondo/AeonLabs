@@ -1,0 +1,26 @@
+[project]
+name = "physics_sim"
+version = "0.1.0"
+description = "Replay a robot demonstration on the UR5e + DG5F in MuJoCo with physics, before the real robot"
+readme = "README.md"
+authors = [
+    { name = "Simone Cirelli", email = "simone.cirelli01@gmail.com" }
+]
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "numpy",
+    "mujoco",
+    "matplotlib",
+]
+
+[project.scripts]
+physics-sim-replay = "physics_sim.replay:main"
+
+[build-system]
+requires = ["uv_build>=0.11.8,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest",
+]
