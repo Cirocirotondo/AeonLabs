@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -11,6 +11,7 @@ import numpy as np
 import pinocchio as pin
 
 from .collisions import FingerCollisionChecker
+from .grasp import GraspStrengthening, strengthen_grasp
 from .hand_optimizer import MAX_JOINT_SPEED
 from .placement import PlacementAdjustment, adjusted_placement, apply, default_placement
 from .retargeters import DEFAULT_SCALING, make_retargeter
@@ -32,9 +33,11 @@ class Settings:
     filter: bool = False
     floating_hand: bool = False
     adjustment: PlacementAdjustment = field(default_factory=PlacementAdjustment)
+    grasp: GraspStrengthening = field(default_factory=GraspStrengthening)
 
     def hand_key(self) -> tuple:
-        """The settings the hand's joint angles depend on; the placement is not among them."""
+        """The settings the retargeter's joint angles depend on; the placement and the grasp
+        strengthening, applied afterwards, are not among them."""
         return (self.method, self.optimizer, self.scaling_mode, self.filter)
 
 
@@ -181,6 +184,18 @@ class Replay:
     def stack(self, attribute: str) -> np.ndarray:
         return np.stack([getattr(frame, attribute) for frame in self.frames])
 
+    def cut(self, first_frame: int = 0, last_frame: int | None = None) -> "Replay":
+        """Only the video frames from ``first_frame`` to ``last_frame``, both kept.
+
+        The whole demonstration is retargeted first and cut afterwards, so the kept
+        frames are the same ones the viewer shows, whatever the range.
+        """
+        last_frame = self.demo.num_frames - 1 if last_frame is None else min(last_frame, self.demo.num_frames - 1)
+        if not 0 <= first_frame < last_frame:
+            raise ValueError(f"cannot keep frames {first_frame} to {last_frame} of {self.demo.num_frames}")
+        keep = slice(first_frame, last_frame + 1)
+        return replace(self, demo=replace(self.demo, skeletons=self.demo.skeletons[keep]), frames=self.frames[keep])
+
     def worst_finger_penetration(self) -> np.ndarray:
         """Per frame, the deepest overlap (m) between any two fingers' meshes; 0 when none touch."""
         return np.array([max(frame.finger_penetration.values(), default=0.0) for frame in self.frames])
@@ -192,6 +207,19 @@ def retarget_hands(demo: HumanDemonstration, robot: RobotKinematics, settings: S
     return [stage.step(skeleton) for skeleton in demo.skeletons]
 
 
+def strengthened_hands(hands: list[HandFrame], grasp: GraspStrengthening, fps: float) -> list[HandFrame]:
+    """The hand frames with the grasp strengthening applied; the frames it leaves alone are returned as they are."""
+    if not grasp.active:
+        return hands
+    hand_q = strengthen_grasp(np.stack([hand.hand_q for hand in hands]), grasp, fps)
+    collisions = _collision_checker()
+    return [
+        hand if np.array_equal(q, hand.hand_q)
+        else replace(hand, hand_q=q, finger_penetration=collisions.penetrations(q))
+        for hand, q in zip(hands, hand_q)
+    ]
+
+
 def retarget_demonstration(
     demo: HumanDemonstration,
     robot: RobotKinematics,
@@ -199,9 +227,10 @@ def retarget_demonstration(
     hands: list[HandFrame] | None = None,
 ) -> Replay:
     """Retarget a whole demonstration; pass ``hands`` from an earlier run with the same
-    ``settings.hand_key()`` to only redo the placement and the arm."""
+    ``settings.hand_key()`` to only redo the grasp strengthening, the placement and the arm."""
     if hands is None:
         hands = retarget_hands(demo, robot, settings)
+    hands = strengthened_hands(hands, settings.grasp, demo.fps)
     placement = adjusted_placement(default_placement(demo, robot), demo.skeletons[0], settings.adjustment)
     arm = ArmStage(robot, placement, settings.floating_hand, demo.fps)
     return Replay(demo=demo, settings=settings, placement=placement, frames=[arm.step(hand) for hand in hands])
@@ -214,7 +243,8 @@ def export_robot_demonstration(
 
     The joint keys are simtoolreal's (``arm_q``, ``arm_dq``, ``hand_q_measured``,
     ``hand_dq_measured``), so its tools read the file as they read a recording; here the
-    hand angles are the retargeted commands, not measurements. The settings that made the
+    hand angles are the retargeted commands, not measurements (with the grasp strengthening,
+    if any: ``grasp_extra`` in rad, thumb to pinky, and its first, last and ramp video frames). The settings that made the
     file are stored beside them, and ``table_top_z`` is the world height of the table
     top the replay was judged against. With ``tube``, the tube's size, starting pose, the
     path of the human grasp that carries it and where the human leaves it are stored too.
@@ -259,6 +289,10 @@ def export_robot_demonstration(
         floating_hand=s.floating_hand,
         placement_adjustment=np.array([a.x, a.y, a.z, a.yaw, a.pitch, a.roll]),  # m, m, m, rad, rad, rad
         placement=replay.placement,
+        grasp_extra=np.array(s.grasp.extra),
+        grasp_frames=np.array(
+            [s.grasp.first_frame, -1 if s.grasp.last_frame is None else s.grasp.last_frame, s.grasp.ramp_frames]
+        ),
         table_top_z=table_top_z,
     )
     return path

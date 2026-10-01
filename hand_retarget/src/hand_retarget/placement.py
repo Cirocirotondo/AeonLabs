@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
+from .grasp import DEFAULT_RAMP_FRAMES, GraspStrengthening
 from .robot import HOME_ARM_Q, RobotKinematics
 from .skeleton import HumanDemonstration, hand_anchor, palm_frame
 
@@ -75,6 +76,9 @@ class SavedPlacement:
     adjustment: PlacementAdjustment = field(default_factory=PlacementAdjustment)
     table_offset: float = 0.0  # m, table top above simtoolreal's height
     tube_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)  # m, m, rad: added to the automatic tube pose
+    first_frame: int = 0  # the robot demonstration keeps the video frames from this one...
+    last_frame: int | None = None  # ...to this one; None is the last of the clip
+    grasp: GraspStrengthening = field(default_factory=GraspStrengthening)
 
 
 def placement_file(csv_path: str | Path) -> Path:
@@ -95,6 +99,14 @@ def load_placement(csv_path: str | Path) -> SavedPlacement:
         ),
         table_offset=v.get("table_cm", 0.0) / 100,
         tube_offset=(v.get("tube_x_cm", 0.0) / 100, v.get("tube_y_cm", 0.0) / 100, np.deg2rad(v.get("tube_yaw_deg", 0.0))),
+        first_frame=v.get("first_frame", 0),
+        last_frame=v.get("last_frame"),
+        grasp=GraspStrengthening(
+            extra=tuple(float(np.deg2rad(a)) for a in v.get("grasp_extra_deg", (0.0,) * 5)),
+            first_frame=v.get("grasp_first_frame", 0),
+            last_frame=v.get("grasp_last_frame"),
+            ramp_frames=v.get("grasp_ramp_frames", DEFAULT_RAMP_FRAMES),
+        ),
     )
 
 
@@ -107,6 +119,16 @@ def save_placement(csv_path: str | Path, saved: SavedPlacement) -> Path:
         "tube_x_cm": round(saved.tube_offset[0] * 100, 3), "tube_y_cm": round(saved.tube_offset[1] * 100, 3),
         "tube_yaw_deg": round(float(np.degrees(saved.tube_offset[2])), 3),
     }
+    if saved.first_frame:
+        values["first_frame"] = saved.first_frame
+    if saved.last_frame is not None:
+        values["last_frame"] = saved.last_frame
+    if saved.grasp.active:
+        values["grasp_extra_deg"] = [round(float(np.degrees(a)), 3) for a in saved.grasp.extra]  # thumb to pinky
+        values["grasp_first_frame"] = saved.grasp.first_frame
+        values["grasp_ramp_frames"] = saved.grasp.ramp_frames
+        if saved.grasp.last_frame is not None:
+            values["grasp_last_frame"] = saved.grasp.last_frame
     path = placement_file(csv_path)
     path.write_text(json.dumps(values, indent=2) + "\n")
     return path

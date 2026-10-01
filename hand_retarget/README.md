@@ -13,6 +13,15 @@ uv run hand-retarget-export data/20260928T132405_scene0_world_joints.csv --metho
 ```
 
 Input is a `*_world_joints.csv`; its `raw_x/y/z_m` columns (right hand) are used as they are.
+The viewer's Start frame and End frame sliders choose which video frames the robot demonstration keeps; they are
+saved with the placement in `*_placement.json` next to the CSV (`first_frame`, `last_frame`), which the export reads too.
+The whole clip is always retargeted, and cut afterwards.
+
+**Strengthen grasp** (viewer folder) closes the fingers more than the human did: an extra angle per finger on the
+joint that closes it at its base (thumb `rj_dg_1_3`, index to ring `rj_dg_x_2`, pinky `rj_dg_5_3`), from a start
+frame to an end frame. It grows linearly over the ramp frames before the start frame and goes away over as many
+after the end frame, and stays inside the joint limits and the speed limit. It is saved with the placement
+(`grasp_extra_deg`, thumb to pinky, `grasp_first_frame`, `grasp_last_frame`, `grasp_ramp_frames`).
 Per frame: optional One-Euro filter → demonstration placement → arm IK puts `rl_dg_palm` on the human palm,
 knuckle row on knuckle row → one of three finger retargeters works in the palm frame:
 

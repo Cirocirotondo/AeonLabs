@@ -20,6 +20,7 @@ import yourdfpy
 from viser.extras import ViserUrdf
 
 from .collisions import FINGER_NAMES
+from .grasp import GRASP_JOINTS, GraspStrengthening
 from .pipeline import Replay, Settings, export_robot_demonstration, retarget_demonstration, retarget_hands
 from .placement import PlacementAdjustment, SavedPlacement, load_placement, save_placement
 from .tube import TubeAdjustment, place_tube
@@ -59,8 +60,8 @@ def _wxyz(rotation: np.ndarray) -> np.ndarray:
 class ReplayViewer:
     def __init__(self, csv_path: Path, port: int):
         self.csv_path = csv_path
-        self.demo = load_world_joints(csv_path)
         self.saved = load_placement(csv_path)
+        self.demo = load_world_joints(csv_path)
         self.robot = RobotKinematics()
         self.server = viser.ViserServer(port=port, label="hand retarget")
         self.lock = threading.Lock()
@@ -117,6 +118,10 @@ class ReplayViewer:
             self.frame = gui.add_slider("Frame", 0, self.demo.num_frames - 1, 1, 0)
             self.playing = gui.add_checkbox("Play", True)
             self.speed = gui.add_slider("Speed", 0.1, 2.0, 0.1, 1.0)
+            last = self.demo.num_frames - 1
+            hint = "Playback and the exported robot demonstration keep only the frames from start to end"
+            self.first_frame = gui.add_slider("Start frame", 0, last, 1, 0, hint=hint)
+            self.last_frame = gui.add_slider("End frame", 0, last, 1, last, hint=hint)
         with gui.add_folder("Retargeting"):
             self.status = gui.add_markdown("")
             self.method = gui.add_dropdown("Method", METHODS, initial_value="vector")
@@ -127,6 +132,21 @@ class ReplayViewer:
             self.scaling = gui.add_dropdown("Hand scaling", ("method default", "global", "per_finger"))
             self.filter = gui.add_checkbox("One-Euro filter", False)
             self.floating = gui.add_checkbox("Floating hand (no arm)", False)
+        with gui.add_folder("Strengthen grasp"):
+            self.grasp_sliders = [
+                gui.add_slider(
+                    f"{finger.capitalize()} (deg)", 0.0, 60.0, 1.0, 0.0,
+                    hint=f"Extra closure of {joint}, the joint that closes the {finger} at its base",
+                )
+                for finger, joint in zip(FINGER_NAMES, GRASP_JOINTS)
+            ]
+            hint = "The extra closure is complete from the start frame to the end frame"
+            self.grasp_first = gui.add_slider("Start frame", 0, last, 1, 0, hint=hint)
+            self.grasp_last = gui.add_slider("End frame", 0, last, 1, last, hint=hint)
+            self.grasp_ramp = gui.add_slider(
+                "Ramp (frames)", 0, 48, 1, 12,
+                hint="The extra closure grows over this many frames before the start frame, and goes away over as many after the end frame",
+            )
         with gui.add_folder("View"):
             self.overlay = gui.add_checkbox("Skeleton over robot", False)
             self.show_tube = gui.add_checkbox("Show tube", True)
@@ -157,12 +177,20 @@ class ReplayViewer:
             export = gui.add_button("Export robot demonstration (60 Hz npz)")
             self.export_status = gui.add_markdown("")
 
-        for handle in (self.method, self.optimizer, self.scaling, self.filter, self.floating, *self.placement_sliders.values()):
+        for handle in (
+            self.method, self.optimizer, self.scaling, self.filter, self.floating, *self.placement_sliders.values(),
+            *self.grasp_sliders, self.grasp_first, self.grasp_last, self.grasp_ramp,
+        ):
             handle.on_update(lambda _: self.recompute())
+        self.grasp_first.on_update(self._show_frame)
+        self.grasp_last.on_update(self._show_frame)
         self.frame.on_update(lambda _: self.render())
         self.overlay.on_update(lambda _: self.render())
         self.show_tube.on_update(lambda _: self.render())
         self.table_height.on_update(lambda _: self.render())
+        # Dragging an end of the range shows the frame it is on.
+        self.first_frame.on_update(self._show_frame)
+        self.last_frame.on_update(self._show_frame)
         for slider in self.tube_sliders.values():
             slider.on_update(lambda _: self.render())
         reset.on_click(lambda _: self._reset_placement())
@@ -181,10 +209,37 @@ class ReplayViewer:
         self.table_height.value = self.saved.table_offset * 100
         for name, value in zip(("x", "y", "yaw"), self.saved.tube_offset):
             self.tube_sliders[name].value = float(np.degrees(value) if name == "yaw" else value * 100)
+        last = self.demo.num_frames - 1
+        self.first_frame.value = min(self.saved.first_frame, last)
+        self.last_frame.value = last if self.saved.last_frame is None else min(self.saved.last_frame, last)
+        grasp = self.saved.grasp
+        for slider, extra in zip(self.grasp_sliders, grasp.extra):
+            slider.value = float(np.degrees(extra))
+        self.grasp_first.value = min(grasp.first_frame, last)
+        self.grasp_last.value = last if grasp.last_frame is None else min(grasp.last_frame, last)
+        self.grasp_ramp.value = grasp.ramp_frames
+
+    def grasp(self) -> GraspStrengthening:
+        first, last = sorted((int(self.grasp_first.value), int(self.grasp_last.value)))
+        return GraspStrengthening(
+            tuple(float(np.deg2rad(s.value)) for s in self.grasp_sliders), first, last, int(self.grasp_ramp.value)
+        )
+
+    def frame_range(self) -> tuple[int, int]:
+        """First and last video frame kept, in order whichever way the sliders were left."""
+        first, last = sorted((int(self.first_frame.value), int(self.last_frame.value)))
+        return (first, last) if first < last else (0, self.demo.num_frames - 1)
+
+    def _show_frame(self, event) -> None:
+        if event.client is None:  # set by "Reset to saved", not dragged
+            return
+        self.playing.value = False
+        self.frame.value = int(event.target.value)
 
     def _save_placement(self) -> None:
         self.saved = SavedPlacement(
-            self.settings().adjustment, self.table_height.value / 100, self.tube_adjustment_values()
+            self.settings().adjustment, self.table_height.value / 100, self.tube_adjustment_values(),
+            *self.frame_range(), self.grasp(),
         )
         path = save_placement(self.csv_path, self.saved)
         self.save_status.content = f"Saved to `{path.name}`"
@@ -194,7 +249,10 @@ class ReplayViewer:
         return (t["x"].value / 100, t["y"].value / 100, float(np.deg2rad(t["yaw"].value)))
 
     def tube(self, replay: Replay):
-        return place_tube(replay, self.table_top(replay), TubeAdjustment(*self.tube_adjustment_values()))
+        # From the kept frames only, as in the export.
+        return place_tube(
+            replay.cut(*self.frame_range()), self.table_top(replay), TubeAdjustment(*self.tube_adjustment_values())
+        )
 
     def _draw_tube(self, replay: Replay) -> None:
         # The tube where it lies when the demonstration starts; without physics it does not move.
@@ -220,6 +278,7 @@ class ReplayViewer:
             scaling_mode=scaling,
             filter=self.filter.value,
             floating_hand=self.floating.value,
+            grasp=self.grasp(),
             adjustment=PlacementAdjustment(
                 x=s["x"] / 100, y=s["y"] / 100, z=s["z"] / 100,
                 yaw=np.deg2rad(s["yaw"]), pitch=np.deg2rad(s["pitch"]), roll=np.deg2rad(s["roll"]),
@@ -316,14 +375,17 @@ class ReplayViewer:
         if replay.settings.floating_hand:
             self.export_status.content = "Switch off the floating hand: a robot demonstration needs the arm."
             return
+        first, last = self.frame_range()
         path = EXPORT_DIR / f"{replay.demo.name}_{replay.settings.method}.npz"
-        export_robot_demonstration(replay, path, self.table_top(replay), self.tube(replay))
-        self.export_status.content = f"Wrote `{path}`"
+        export_robot_demonstration(replay.cut(first, last), path, self.table_top(replay), self.tube(replay))
+        self.export_status.content = f"Wrote `{path}` (frames {first} to {last})"
 
     def run(self) -> None:
         while True:
             if self.playing.value:
-                self.frame.value = (int(self.frame.value) + 1) % self.demo.num_frames
+                first, last = self.frame_range()
+                following = int(self.frame.value) + 1
+                self.frame.value = following if first <= following <= last else first
             time.sleep(1.0 / (self.demo.fps * self.speed.value))
 
 

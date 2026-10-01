@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from hand_retarget.pipeline import Settings, retarget_demonstration, retarget_hands
+from hand_retarget.pipeline import Settings, export_robot_demonstration, retarget_demonstration, retarget_hands
 from hand_retarget.placement import PlacementAdjustment
 from hand_retarget.placement import apply, default_placement
 from hand_retarget.hand_optimizer import MAX_JOINT_SPEED
@@ -241,3 +241,44 @@ def test_saved_placement_round_trips(tmp_path):
     loaded = load_placement(csv)
     np.testing.assert_allclose(list(vars(loaded.adjustment).values()), list(vars(saved.adjustment).values()), atol=1e-4)
     assert loaded.table_offset == pytest.approx(0.02)
+
+
+def test_frame_range_is_saved_and_cuts_the_replay(tmp_path, demo, robot):
+    from hand_retarget.placement import SavedPlacement, load_placement, save_placement
+
+    csv = tmp_path / "clip_world_joints.csv"
+    save_placement(csv, SavedPlacement(first_frame=10, last_frame=95))
+    loaded = load_placement(csv)
+    assert (loaded.first_frame, loaded.last_frame) == (10, 95)
+
+    replay = retarget_demonstration(demo, robot, Settings(method="joint_mapping"))
+    cut = replay.cut(loaded.first_frame, loaded.last_frame)
+    assert cut.demo.num_frames == len(cut.frames) == 86  # frames 10 to 95
+    np.testing.assert_array_equal(cut.stack("arm_q"), replay.stack("arm_q")[10:96])
+    exported = np.load(export_robot_demonstration(cut, tmp_path / "cut.npz"))
+    assert exported["timestamp"][-1] == pytest.approx(85 / demo.fps, abs=1 / 60)
+
+
+def test_grasp_strengthening_closes_the_base_joints_between_its_frames(tmp_path, demo, robot):
+    from hand_retarget.grasp import GRASP_JOINT_INDEX, GraspStrengthening
+    from hand_retarget.placement import SavedPlacement, load_placement, save_placement
+
+    grasp = GraspStrengthening(tuple(np.deg2rad([10.0, 20.0, 20.0, 20.0, 15.0])), first_frame=30, last_frame=60, ramp_frames=10)
+    csv = tmp_path / "clip_world_joints.csv"
+    save_placement(csv, SavedPlacement(grasp=grasp))
+    loaded = load_placement(csv).grasp
+    assert (loaded.first_frame, loaded.last_frame, loaded.ramp_frames) == (30, 60, 10)
+    np.testing.assert_allclose(loaded.extra, grasp.extra, atol=1e-4)
+
+    plain = retarget_demonstration(demo, robot, Settings(method="joint_mapping"))
+    closed = retarget_demonstration(demo, robot, Settings(method="joint_mapping", grasp=grasp))
+    before, after = plain.stack("hand_q"), closed.stack("hand_q")
+    np.testing.assert_array_equal(after[:21], before[:21])  # nothing until the ramp begins, 10 frames before the start
+    np.testing.assert_allclose(after[71:], before[71:], atol=1e-9)  # and nothing once ramped out
+    np.testing.assert_allclose(grasp.envelope(100)[[20, 25, 30, 60, 65, 70]], [0, 0.5, 1, 1, 0.5, 0], atol=1e-12)
+    others = np.setdiff1d(np.arange(20), GRASP_JOINT_INDEX)
+    np.testing.assert_array_equal(after[:, others], before[:, others])
+    expected = np.minimum(before[45, GRASP_JOINT_INDEX] + grasp.extra, HAND_UPPER[GRASP_JOINT_INDEX])
+    np.testing.assert_allclose(after[45, GRASP_JOINT_INDEX], expected, atol=1e-9)
+    assert (after[45, GRASP_JOINT_INDEX] >= before[45, GRASP_JOINT_INDEX]).all()
+    assert np.abs(np.diff(after, axis=0)).max() <= MAX_JOINT_SPEED / demo.fps + 1e-9

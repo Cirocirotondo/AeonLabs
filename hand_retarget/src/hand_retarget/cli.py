@@ -25,13 +25,13 @@ def export_main() -> None:
     parser.add_argument("--out", type=Path, default=None)
     args = parser.parse_args()
 
-    demo = load_world_joints(args.csv)
     saved = load_placement(args.csv)  # the placement tuned in the viewer, if any
-    settings = Settings(method=args.method, scaling_mode=args.scaling, filter=args.filter, adjustment=saved.adjustment)
-    replay = retarget_demonstration(demo, RobotKinematics(), settings)
+    demo = load_world_joints(args.csv)
+    settings = Settings(method=args.method, scaling_mode=args.scaling, filter=args.filter, adjustment=saved.adjustment, grasp=saved.grasp)
+    replay = retarget_demonstration(demo, RobotKinematics(), settings).cut(saved.first_frame, saved.last_frame)
     out = args.out or Path("out") / f"{demo.name}_{args.method}.npz"
     table_top = TABLE_TOP_Z + saved.table_offset
     tube = place_tube(replay, table_top, TubeAdjustment(*saved.tube_offset))
     export_robot_demonstration(replay, out, table_top, tube)
     errors = replay.stack("fingertip_error") * 1000
-    print(f"{out}: {demo.num_frames} frames, fingertip error mean {errors.mean():.1f} mm, per finger {np.round(errors.mean(0), 1)}")
+    print(f"{out}: {replay.demo.num_frames} frames, fingertip error mean {errors.mean():.1f} mm, per finger {np.round(errors.mean(0), 1)}")
